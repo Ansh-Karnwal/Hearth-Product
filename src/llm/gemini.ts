@@ -15,6 +15,7 @@ export interface GenerateOptions {
   requestId?: number;
   system?: string;
   jsonSchema?: object;
+  grounded?: boolean;
 }
 
 export interface GenerateResult {
@@ -74,6 +75,7 @@ export default class Gemini {
         ...(options.jsonSchema
           ? { responseMimeType: "application/json", responseSchema: options.jsonSchema }
           : {}),
+        ...(options.grounded ? { tools: [{ googleSearch: {} }] } : {}),
       },
     });
 
@@ -90,9 +92,7 @@ export default class Gemini {
   }
 
   private stubGenerate(prompt: string, options: GenerateOptions): GenerateResult {
-    const text = options.jsonSchema
-      ? JSON.stringify({ stub: true, operation: options.operation })
-      : `[stub:${GEMINI_MODEL}] ${prompt}`;
+    const text = this.stubText(prompt, options);
 
     const promptTokens = estimateTokens(prompt);
     const completionTokens = estimateTokens(text);
@@ -105,5 +105,58 @@ export default class Gemini {
         totalTokens: promptTokens + completionTokens,
       },
     };
+  }
+
+  private stubText(prompt: string, options: GenerateOptions): string {
+    if (options.operation === "request_parse") {
+      const request = /raw request:\s*"([^"]+)"/i.exec(prompt)?.[1] ?? prompt;
+      const itemMatch = /\bbuy\s+me\s+(.+)$/i.exec(request.trim());
+      const itemText = (itemMatch?.[1] ?? request).replace(/[?.!]+$/g, "").trim().toLowerCase();
+      const quantityMatch = /^(\d+(?:\.\d+)?\s*(?:x|lb|lbs|oz|pack|packs|bunch|bunches|bag|bags)?)\s+(.+)$/i.exec(
+        itemText
+      );
+      const itemName = (quantityMatch?.[2] ?? itemText).trim();
+      const quantity = quantityMatch?.[1] ?? "1";
+      return JSON.stringify({ itemName, quantity });
+    }
+
+    if (options.operation === "price_sweep") {
+      const itemName = /item:\s*([^\n]+)/i.exec(prompt)?.[1]?.trim().toLowerCase() ?? "item";
+      const unit = itemName.includes("celery") ? "bunch" : "each";
+      const noClear = /ambiguous|tie|no clear|close call/i.test(itemName);
+      const candidates = noClear
+        ? [
+            { store: "Trader Joe's", price: 2.0, unit },
+            { store: "Star Market", price: 2.08, unit },
+          ]
+        : [
+            { store: "Trader Joe's", price: 1.99, unit },
+            { store: "Star Market", price: 2.49, unit },
+            { store: "Whole Foods", price: 2.79, unit },
+          ];
+      return JSON.stringify({ candidates });
+    }
+
+    if (options.operation === "crowd_parse") {
+      const reply = /reply:\s*"([^"]+)"/i.exec(prompt)?.[1] ?? prompt;
+      const priceMatch = /\$?\s*(\d+(?:\.\d{1,2})?)/.exec(reply);
+      const atStoreMatch = /\bat\s+([A-Za-z0-9 '&.-]+)/i.exec(reply);
+      const storeMatch = /^([A-Za-z0-9 '&.-]+?)\s+(?:has|is|for|\$)/i.exec(reply);
+      return JSON.stringify({
+        store: (atStoreMatch?.[1] ?? storeMatch?.[1] ?? "Unknown store").trim(),
+        price: priceMatch ? Number(priceMatch[1]) : null,
+      });
+    }
+
+    if (options.operation === "growth_post") {
+      const stat = /stat:\s*([\s\S]+)/i.exec(prompt)?.[1]?.trim() ?? prompt.trim();
+      return `Hearth price watch: ${stat}`;
+    }
+
+    if (options.jsonSchema) {
+      return JSON.stringify({ stub: true, operation: options.operation });
+    }
+
+    return `[stub:${GEMINI_MODEL}] ${prompt}`;
   }
 }

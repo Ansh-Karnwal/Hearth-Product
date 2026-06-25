@@ -1,25 +1,27 @@
-import { Bot, Keyboard } from "grammy";
-import { TELEGRAM_BOT_TOKEN } from "../config";
+import { Bot, Context, Keyboard } from "grammy";
+import { HEARTH_ADMIN_TELEGRAM_IDS, TELEGRAM_BOT_TOKEN } from "../config";
 import { UserRow } from "../data/schema";
 import { DataStore } from "../data/store";
+import { findUserByPhone, findUserByTelegramId, normalizePhone } from "../data/users";
 import Gemini from "../llm/gemini";
+import { runGrowthLoop } from "../loops/growth";
+import { currentMonthRange, formatUsageSummary, usageFor, usageForAll } from "../loops/monetization";
+import { handleBuyRequest, handleConfirmationCallback, handleCrowdReply } from "../loops/product";
 
 const CONTACT_BUTTON_TEXT = "Share phone number to set up Hearth";
 const ACK_TEXT = "Got it. Say 'buy me <item>' and I'll find you the best price.";
 
-function normalizePhone(raw: string): string {
-  const trimmed = raw.trim().replace(/[\s\-()]/g, "");
-  return trimmed.startsWith("+") ? trimmed : `+${trimmed}`;
+function isAdmin(telegramUserId: number): boolean {
+  return HEARTH_ADMIN_TELEGRAM_IDS.includes(telegramUserId);
 }
 
-async function findUserByPhone(store: DataStore, phoneNumber: string): Promise<UserRow | null> {
-  const rows = await store.query<UserRow>("users", { filters: { phone_number: phoneNumber }, limit: 1 });
-  return rows[0] ?? null;
-}
-
-async function findUserByTelegramId(store: DataStore, telegramUserId: number): Promise<UserRow | null> {
-  const rows = await store.query<UserRow>("users", { filters: { telegram_user_id: telegramUserId }, limit: 1 });
-  return rows[0] ?? null;
+async function requireAdmin(ctx: Context): Promise<boolean> {
+  const telegramUserId = ctx.from?.id;
+  if (!telegramUserId || !isAdmin(telegramUserId)) {
+    await ctx.reply("Admin command. Set HEARTH_ADMIN_TELEGRAM_IDS to your Telegram user id.");
+    return false;
+  }
+  return true;
 }
 
 // Pure, grammy-independent handlers — exported so the signup/zip flow can be
@@ -83,10 +85,35 @@ export async function handleTextMessage(
 }
 
 export function createBot(store: DataStore, gemini: Gemini): Bot {
-  void gemini; // wired in for the product loop (Step 5–6); unused until then
-
   const bot = new Bot(TELEGRAM_BOT_TOKEN);
   const dm = bot.chatType("private");
+  const group = bot.chatType("group");
+  const supergroup = bot.chatType("supergroup");
+
+  bot.callbackQuery(/^confirm_buy:(\d+):(yes|no)$/, async (ctx) => {
+    await handleConfirmationCallback(ctx, store);
+  });
+
+  bot.command("growthnow", async (ctx) => {
+    if (!(await requireAdmin(ctx))) return;
+    const result = await runGrowthLoop(store, gemini, bot);
+    await ctx.reply(result.posted ? "Growth insight posted." : `Growth skipped: ${result.reason ?? "unknown"}.`);
+  });
+
+  bot.command("usage_all", async (ctx) => {
+    if (!(await requireAdmin(ctx))) return;
+    const { start, end } = currentMonthRange();
+    const summary = await usageForAll(store, start, end);
+    await ctx.reply(formatUsageSummary(summary, "All Hearth usage this month"));
+  });
+
+  group.on("message:text", async (ctx) => {
+    await handleCrowdReply(ctx, store, gemini);
+  });
+
+  supergroup.on("message:text", async (ctx) => {
+    await handleCrowdReply(ctx, store, gemini);
+  });
 
   dm.command("start", async (ctx) => {
     const { alreadyRegistered, displayName } = await handleStart(store, ctx.from.id);
@@ -101,6 +128,18 @@ export function createBot(store: DataStore, gemini: Gemini): Bot {
     });
   });
 
+  dm.command("usage", async (ctx) => {
+    const user = await findUserByTelegramId(store, ctx.from.id);
+    if (!user) {
+      await ctx.reply("Start with /start and share your phone number so I can show account usage.");
+      return;
+    }
+
+    const { start, end } = currentMonthRange();
+    const summary = await usageFor(store, user.id, start, end);
+    await ctx.reply(formatUsageSummary(summary, "Your Hearth usage this month"));
+  });
+
   dm.on("message:contact", async (ctx) => {
     const contact = ctx.message.contact;
     const reply = await handleContactShare(store, {
@@ -113,6 +152,12 @@ export function createBot(store: DataStore, gemini: Gemini): Bot {
   });
 
   dm.on("message:text", async (ctx) => {
+    if (ctx.message.text.startsWith("/")) return;
+    if (/^\s*buy\s+me\b/i.test(ctx.message.text)) {
+      await handleBuyRequest(ctx, store, gemini);
+      return;
+    }
+
     const reply = await handleTextMessage(store, ctx.from.id, ctx.message.text);
     await ctx.reply(reply);
   });

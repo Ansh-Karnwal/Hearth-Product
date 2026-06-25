@@ -88,8 +88,12 @@ export class SqliteStore implements DataStore {
           params.push(value.lt);
         }
       } else {
-        clauses.push(`${column} = ?`);
-        params.push(value);
+        if (value === null) {
+          clauses.push(`${column} IS NULL`);
+        } else {
+          clauses.push(`${column} = ?`);
+          params.push(value);
+        }
       }
     }
 
