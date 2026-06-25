@@ -83,7 +83,7 @@ async function main(): Promise<void> {
 
   await resolveCrowdQuestion(post.id, store, fakeApi);
   const requestId = await latestRequestId(store);
-  console.log("Confirm:", await confirmPurchaseRequest(store, requestId, true));
+  console.log("Confirm:", await confirmPurchaseRequest(store, requestId, true, llm, fakeApi));
   console.log("Learned prices:", await store.query("price_intelligence", { sort: [["id", "asc"]] }));
   console.log("Token operations:", await store.query("token_usage", { sort: [["id", "asc"]] }));
 

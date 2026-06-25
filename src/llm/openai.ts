@@ -186,6 +186,11 @@ export default class OpenAiLlm {
       return `Hearth price watch: ${stat}`;
     }
 
+    if (options.operation === "purchase_highlight") {
+      const item = /Item:\s*([^\n]+)/i.exec(prompt)?.[1]?.trim() ?? "something";
+      return `One of my customers just grabbed ${item}. Good times.`;
+    }
+
     if (options.jsonSchema) {
       return JSON.stringify({ stub: true, operation: options.operation });
     }

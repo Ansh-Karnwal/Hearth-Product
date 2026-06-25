@@ -153,7 +153,7 @@ export interface TokenUsageRow {
   created_at: string;
 }
 
-export type SocialPostType = "growth_insight" | "crowd_question";
+export type SocialPostType = "growth_insight" | "crowd_question" | "purchase_highlight";
 
 export interface SocialPostRow {
   id: number;

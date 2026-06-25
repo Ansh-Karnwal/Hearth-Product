@@ -8,6 +8,13 @@ import { confirmPurchaseRequest, handleBuyRequest } from "../loops/product";
 
 const telegramUserId = 555000222;
 
+const fakeApi = {
+  sendMessage: async (chatId: string | number, message: string) => {
+    console.log("API sendMessage:", chatId, message);
+    return { message_id: 999 };
+  },
+};
+
 function fakePrivateCtx(text: string): any {
   return {
     from: { id: telegramUserId },
@@ -17,12 +24,7 @@ function fakePrivateCtx(text: string): any {
       console.log("DM:", message);
       if (options) console.log("DM options:", JSON.stringify(options));
     },
-    api: {
-      sendMessage: async (chatId: string | number, message: string) => {
-        console.log("API sendMessage:", chatId, message);
-        return { message_id: 999 };
-      },
-    },
+    api: fakeApi,
   };
 }
 
@@ -57,7 +59,7 @@ async function main(): Promise<void> {
   await handleBuyRequest(fakePrivateCtx("buy me celery"), store, llm);
   const firstRequestId = await latestRequestId(store);
   console.log("First request ops before confirm:", await operationsForRequest(store, firstRequestId));
-  console.log("First confirm:", await confirmPurchaseRequest(store, firstRequestId, true));
+  console.log("First confirm:", await confirmPurchaseRequest(store, firstRequestId, true, llm, fakeApi));
 
   const learnedAfterFirst = await store.query("price_intelligence", {
     filters: { item_name: "celery", zip_code: "02139" },
@@ -68,7 +70,7 @@ async function main(): Promise<void> {
   await handleBuyRequest(fakePrivateCtx("buy me celery"), store, llm);
   const secondRequestId = await latestRequestId(store);
   console.log("Second request ops before confirm:", await operationsForRequest(store, secondRequestId));
-  console.log("Second confirm:", await confirmPurchaseRequest(store, secondRequestId, true));
+  console.log("Second confirm:", await confirmPurchaseRequest(store, secondRequestId, true, llm, fakeApi));
 
   const tokenRows = await store.query("token_usage", { sort: [["id", "asc"]] });
   console.log("All token_usage rows:", tokenRows);

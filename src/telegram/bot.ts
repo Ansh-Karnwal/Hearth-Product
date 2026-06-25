@@ -149,7 +149,7 @@ export function createBot(store: DataStore, gemini: LlmClient): Bot {
   const supergroup = bot.chatType("supergroup");
 
   bot.callbackQuery(/^confirm_buy:(\d+):(yes|no)$/, async (ctx) => {
-    await handleConfirmationCallback(ctx, store);
+    await handleConfirmationCallback(ctx, store, gemini);
   });
 
   bot.command("growthnow", async (ctx) => {

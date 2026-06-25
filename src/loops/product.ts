@@ -1,8 +1,10 @@
 import { Context, InlineKeyboard } from "grammy";
 import {
+  CLEAR_WINNER_MARGIN,
   CROWD_COLLECTION_WINDOW_MS,
   HEARTH_CROWD_GROUP_ID,
   KNOWN_GROCERY_STORES,
+  PRODUCT_COMMENT_PROBABILITY,
   SWEEP_FRESHNESS_DAYS,
 } from "../config";
 import { lookupPrices } from "../data/moat";
@@ -136,6 +138,25 @@ function dbRowsToCandidates(rows: PriceIntelligenceRow[]): PriceCandidate[] {
   }));
 }
 
+// LLM price sweeps (and occasionally crowd replies) sometimes list the same
+// store more than once at different prices — e.g. different Instacart SKUs
+// all labeled "Walmart". Left alone, that makes a store look like it's
+// "beating" a genuine competitor when it's really just beating itself, and
+// writes conflicting price_intelligence rows for one store/observation.
+// Collapsing to the cheapest price per store before any comparison or DB
+// write keeps both honest.
+function dedupeByStore(candidates: PriceCandidate[]): PriceCandidate[] {
+  const cheapestByStore = new Map<string, PriceCandidate>();
+  for (const candidate of candidates) {
+    const key = candidate.store.trim().toLowerCase();
+    const existing = cheapestByStore.get(key);
+    if (!existing || candidate.price < existing.price) {
+      cheapestByStore.set(key, candidate);
+    }
+  }
+  return [...cheapestByStore.values()];
+}
+
 export function chooseClearWinner(candidates: PriceCandidate[]): PriceCandidate | null {
   const sorted = candidates
     .filter((candidate) => Number.isFinite(candidate.price) && candidate.price > 0)
@@ -145,12 +166,68 @@ export function chooseClearWinner(candidates: PriceCandidate[]): PriceCandidate 
   if (sorted.length === 1) return sorted[0];
 
   const [cheapest, nextCheapest] = sorted;
-  return cheapest.price <= nextCheapest.price * 0.9 ? cheapest : null;
+  return cheapest.price <= nextCheapest.price * (1 - CLEAR_WINNER_MARGIN) ? cheapest : null;
 }
 
 function formatPrice(candidate: PriceCandidate): string {
   const unit = candidate.unit ? `/${candidate.unit}` : "";
   return `$${candidate.price.toFixed(2)}${unit}`;
+}
+
+function formatCandidateList(candidates: PriceCandidate[]): string {
+  return candidates.map((candidate) => `${candidate.store}: ${formatPrice(candidate)}`).join(", ");
+}
+
+interface PurchaseHighlightParams {
+  itemName: string;
+  chosen: PriceCandidate;
+  candidates: PriceCandidate[];
+  userId: number;
+  requestId: number;
+}
+
+// Growth-loop mechanic: when crowd-sourcing didn't activate (a clear winner
+// was found directly), post an anonymized, relatable highlight of the real
+// purchase to the Hearth community group — social proof to drive signups.
+// Reuses HEARTH_CROWD_GROUP_ID since that's the same community chat.
+// Probability lets us dial this down later if it gets repetitive.
+async function maybePostPurchaseHighlight(
+  gemini: LlmClient,
+  dataStore: DataStore,
+  api: TelegramSender,
+  params: PurchaseHighlightParams
+): Promise<void> {
+  if (!HEARTH_CROWD_GROUP_ID) return;
+  if (Math.random() >= PRODUCT_COMMENT_PROBABILITY) return;
+
+  const { itemName, chosen, candidates, userId, requestId } = params;
+  const result = await gemini.generate(
+    [
+      "You are Hearth, a grocery-shopping bot. In your own voice, write one short, casual Telegram",
+      'post about a real purchase you just made for a customer — relatable, slightly funny,',
+      'social-proof style (e.g. "one of my customers grabbed toilet paper for $9.48 — it\'s getting',
+      'rough out here!"). Don\'t reveal the customer\'s name or any personal details.',
+      "Under 280 characters. No hashtags, no markdown.",
+      "Only react to what's stated below — don't invent trends or comparisons not shown.",
+      `Item: ${itemName}`,
+      `Price: ${chosen.store} for ${formatPrice(chosen)}`,
+      `All prices found: ${formatCandidateList(candidates)}`,
+    ].join("\n"),
+    { operation: "purchase_highlight", userId, requestId }
+  );
+
+  const text = result.text.trim();
+  if (!text) return;
+
+  const sent = await api.sendMessage(HEARTH_CROWD_GROUP_ID, text);
+  await dataStore.insert<SocialPostRow>("social_posts", {
+    post_type: "purchase_highlight",
+    channel: HEARTH_CROWD_GROUP_ID,
+    content: text,
+    related_request_id: requestId,
+    telegram_message_id: sent.message_id,
+    posted_at: new Date().toISOString(),
+  });
 }
 
 function sameCandidate(a: PriceCandidate, b: PriceCandidate): boolean {
@@ -328,8 +405,8 @@ export async function handleBuyRequest(ctx: Context, store: DataStore, gemini: L
     status: "sweeping",
   });
 
-  const dbCandidates = dbRowsToCandidates(
-    await lookupPrices(store, parsed.itemName, user.zip_code, SWEEP_FRESHNESS_DAYS)
+  const dbCandidates = dedupeByStore(
+    dbRowsToCandidates(await lookupPrices(store, parsed.itemName, user.zip_code, SWEEP_FRESHNESS_DAYS))
   );
   const dbWinner = chooseClearWinner(dbCandidates);
   if (dbWinner) {
@@ -340,7 +417,9 @@ export async function handleBuyRequest(ctx: Context, store: DataStore, gemini: L
     return;
   }
 
-  const sweptCandidates = await freshSweep(gemini, parsed.itemName, user.zip_code, user.id, request.id);
+  const sweptCandidates = dedupeByStore(
+    await freshSweep(gemini, parsed.itemName, user.zip_code, user.id, request.id)
+  );
   const sweepWinner = chooseClearWinner(sweptCandidates);
   if (sweepWinner) {
     await queueConfirmation(store, request, user, sweptCandidates, sweepWinner, (text, keyboard) =>
@@ -390,7 +469,9 @@ async function writeBackCandidates(store: DataStore, pending: PendingConfirmatio
 export async function confirmPurchaseRequest(
   store: DataStore,
   requestId: number,
-  confirmed: boolean
+  confirmed: boolean,
+  gemini: LlmClient,
+  api: TelegramSender
 ): Promise<ConfirmationResult> {
   const request = await store.get<PurchaseRequestRow>("purchase_requests", requestId);
   if (!request) return { ok: false, message: "That request no longer exists." };
@@ -423,13 +504,27 @@ export async function confirmPurchaseRequest(
   await writeBackCandidates(store, pending);
   pendingConfirmations.delete(requestId);
 
+  // Only highlight purchases that were resolved directly (DB hit or fresh
+  // sweep) — crowd-sourced ones already activated the crowd, so they don't
+  // need the growth-loop social-proof post.
+  const wentThroughCrowd = pending.candidates.some((candidate) => candidate.source === "crowd");
+  if (!wentThroughCrowd) {
+    await maybePostPurchaseHighlight(gemini, store, api, {
+      itemName: pending.itemName,
+      chosen: pending.chosen,
+      candidates: pending.candidates,
+      userId: pending.userId,
+      requestId,
+    });
+  }
+
   return {
     ok: true,
     message: `Purchased ${pending.itemName} from ${pending.chosen.store} for ${formatPrice(pending.chosen)}.`,
   };
 }
 
-export async function handleConfirmationCallback(ctx: Context, store: DataStore): Promise<void> {
+export async function handleConfirmationCallback(ctx: Context, store: DataStore, gemini: LlmClient): Promise<void> {
   const match = (ctx as Context & { match?: RegExpMatchArray }).match;
   const requestId = Number(match?.[1]);
   const decision = match?.[2];
@@ -438,7 +533,7 @@ export async function handleConfirmationCallback(ctx: Context, store: DataStore)
     return;
   }
 
-  const result = await confirmPurchaseRequest(store, requestId, decision === "yes");
+  const result = await confirmPurchaseRequest(store, requestId, decision === "yes", gemini, ctx.api);
   await ctx.answerCallbackQuery(result.ok ? "Updated." : "Could not update.");
   await ctx.editMessageReplyMarkup().catch(() => undefined);
   await ctx.reply(result.message);
@@ -564,18 +659,20 @@ export async function resolveCrowdQuestion(
     sort: [["parsed_price", "asc"]],
   });
 
-  const candidates = responses
-    .map((response) =>
-      cleanCandidate(
-        {
-          store: response.parsed_store,
-          price: response.parsed_price,
-          unit: null,
-        },
-        "crowd"
+  const candidates = dedupeByStore(
+    responses
+      .map((response) =>
+        cleanCandidate(
+          {
+            store: response.parsed_store,
+            price: response.parsed_price,
+            unit: null,
+          },
+          "crowd"
+        )
       )
-    )
-    .filter((candidate) => candidate !== null);
+      .filter((candidate) => candidate !== null)
+  );
 
   if (candidates.length === 0) {
     await store.update<PurchaseRequestRow>("purchase_requests", request.id, {

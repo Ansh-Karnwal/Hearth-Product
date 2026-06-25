@@ -28,6 +28,14 @@ export const MONTHLY_FLOOR_USD = 20;
 
 // Product loop
 export const SWEEP_FRESHNESS_DAYS = 7;
+// How far below the next-cheapest price the cheapest candidate must be to
+// count as a "clear winner" (skip crowd-sourcing). Real grocery prices
+// rarely differ by more than a few percent across stores, so this is small.
+export const CLEAR_WINNER_MARGIN = 0.03;
+// Chance Hearth sends a short, human-sounding reaction to the price it found
+// (only when crowd-sourcing did NOT activate). 1 = always; dial down later
+// if it gets annoying.
+export const PRODUCT_COMMENT_PROBABILITY = 1;
 export const CROWD_COLLECTION_WINDOW_MS = Number(process.env.CROWD_COLLECTION_WINDOW_MS ?? 180_000);
 export const KNOWN_GROCERY_STORES = [
   "Trader Joe's",
