@@ -86,6 +86,15 @@ export async function handleTextMessage(
 
 export function createBot(store: DataStore, gemini: Gemini): Bot {
   const bot = new Bot(TELEGRAM_BOT_TOKEN);
+
+  // Without a global error boundary, an unhandled throw in any handler (e.g. a
+  // Gemini API error) crashes the whole long-polling process instead of just
+  // failing that one update. See https://grammy.dev/guide/errors.
+  bot.catch(({ ctx, error }) => {
+    console.error(`Error while handling update ${ctx.update.update_id}:`, error);
+    ctx.reply("Something went wrong on my end — please try again.").catch(() => undefined);
+  });
+
   const dm = bot.chatType("private");
   const group = bot.chatType("group");
   const supergroup = bot.chatType("supergroup");
