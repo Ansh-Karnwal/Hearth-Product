@@ -2,7 +2,7 @@ import { Bot } from "grammy";
 import { GROWTH_INTERVAL_HOURS, HEARTH_CHANNEL_ID } from "../config";
 import { PriceIntelligenceRow, SocialPostRow } from "../data/schema";
 import { DataStore } from "../data/store";
-import Gemini from "../llm/gemini";
+import { LlmClient } from "../llm";
 
 interface InterestingStat {
   score: number;
@@ -141,7 +141,7 @@ async function computeInterestingStat(store: DataStore): Promise<InterestingStat
   return candidates.sort((a, b) => b.score - a.score)[0];
 }
 
-export async function runGrowthLoop(store: DataStore, gemini: Gemini, bot: Bot): Promise<GrowthRunResult> {
+export async function runGrowthLoop(store: DataStore, gemini: LlmClient, bot: Bot): Promise<GrowthRunResult> {
   const stat = await computeInterestingStat(store);
   if (!stat) {
     console.log("growth: insufficient data");
@@ -177,7 +177,7 @@ export async function runGrowthLoop(store: DataStore, gemini: Gemini, bot: Bot):
   return { posted: true, content, telegramMessageId: sent.message_id };
 }
 
-export function startGrowthScheduler(store: DataStore, gemini: Gemini, bot: Bot): NodeJS.Timeout {
+export function startGrowthScheduler(store: DataStore, gemini: LlmClient, bot: Bot): NodeJS.Timeout {
   return setInterval(() => {
     runGrowthLoop(store, gemini, bot).catch((error) => {
       console.error("growth loop failed", error);

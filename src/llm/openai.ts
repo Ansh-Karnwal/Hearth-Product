@@ -1,5 +1,5 @@
-import { GoogleGenAI } from "@google/genai";
-import { GEMINI_MODEL } from "../config";
+import OpenAI from "openai";
+import { OPENAI_MODEL } from "../config";
 import { TokenUsageRow } from "../data/schema";
 import { DataStore } from "../data/store";
 import { GenerateOptions, GenerateResult, UsageMetadata } from "./types";
@@ -15,28 +15,38 @@ function cleanJsonText(raw: string): string {
   }
 }
 
-// Rough offline heuristic (~4 chars/token) so the stub still produces
-// plausible, deterministic-for-the-same-input usage numbers.
 function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
-export default class Gemini {
-  private client: GoogleGenAI | null;
+function outputTextFrom(response: any): string {
+  if (typeof response.output_text === "string") return response.output_text;
+
+  const chunks: string[] = [];
+  for (const item of response.output ?? []) {
+    for (const content of item.content ?? []) {
+      if (typeof content.text === "string") chunks.push(content.text);
+    }
+  }
+  return chunks.join("");
+}
+
+export default class OpenAiLlm {
+  private client: OpenAI | null;
 
   constructor(private store: DataStore, apiKey: string) {
-    this.client = apiKey ? new GoogleGenAI({ apiKey }) : null;
+    this.client = apiKey ? new OpenAI({ apiKey }) : null;
   }
 
   async generate(prompt: string, options: GenerateOptions): Promise<GenerateResult> {
     const { text, usage } = this.client
-      ? await this.callGemini(prompt, options)
+      ? await this.callOpenAi(prompt, options)
       : this.stubGenerate(prompt, options);
 
     await this.store.insert<TokenUsageRow>("token_usage", {
       user_id: options.userId ?? null,
       operation: options.operation,
-      model: GEMINI_MODEL,
+      model: OPENAI_MODEL,
       prompt_tokens: usage.promptTokens,
       completion_tokens: usage.completionTokens,
       total_tokens: usage.totalTokens,
@@ -47,26 +57,42 @@ export default class Gemini {
     return { text, usage };
   }
 
-  private async callGemini(prompt: string, options: GenerateOptions): Promise<GenerateResult> {
-    const response = await this.client!.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: prompt,
-      config: {
-        ...(options.system ? { systemInstruction: options.system } : {}),
-        ...(options.jsonSchema
-          ? { responseMimeType: "application/json", responseSchema: options.jsonSchema }
-          : {}),
-        ...(options.grounded ? { tools: [{ googleSearch: {} }] } : {}),
-      },
-    });
+  private async callOpenAi(prompt: string, options: GenerateOptions): Promise<GenerateResult> {
+    const input = [
+      ...(options.system ? [{ role: "system", content: options.system }] : []),
+      { role: "user", content: prompt },
+    ];
 
-    const rawText = response.text ?? "";
+    const response = await this.client!.responses.create({
+      model: OPENAI_MODEL,
+      input,
+      max_output_tokens: options.jsonSchema ? 500 : 800,
+      ...(options.grounded
+        ? {
+            tools: [{ type: "web_search", search_context_size: "low" }],
+            tool_choice: "auto",
+          }
+        : {}),
+      ...(options.jsonSchema
+        ? {
+            text: {
+              format: {
+                type: "json_schema",
+                name: `${options.operation}_response`,
+                schema: options.jsonSchema,
+                strict: false,
+              },
+            },
+          }
+        : {}),
+    } as any);
+
+    const rawText = outputTextFrom(response);
     const text = options.jsonSchema ? cleanJsonText(rawText) : rawText;
-
     const usage: UsageMetadata = {
-      promptTokens: response.usageMetadata?.promptTokenCount ?? 0,
-      completionTokens: response.usageMetadata?.candidatesTokenCount ?? 0,
-      totalTokens: response.usageMetadata?.totalTokenCount ?? 0,
+      promptTokens: response.usage?.input_tokens ?? 0,
+      completionTokens: response.usage?.output_tokens ?? 0,
+      totalTokens: response.usage?.total_tokens ?? 0,
     };
 
     return { text, usage };
@@ -74,7 +100,6 @@ export default class Gemini {
 
   private stubGenerate(prompt: string, options: GenerateOptions): GenerateResult {
     const text = this.stubText(prompt, options);
-
     const promptTokens = estimateTokens(prompt);
     const completionTokens = estimateTokens(text);
 
@@ -105,26 +130,30 @@ export default class Gemini {
       const itemName = /item:\s*([^\n]+)/i.exec(prompt)?.[1]?.trim().toLowerCase() ?? "item";
       const unit = itemName.includes("celery") ? "bunch" : "each";
       const noClear = /ambiguous|tie|no clear|close call/i.test(itemName);
-      const candidates = noClear
-        ? [
+      if (noClear) {
+        return JSON.stringify({
+          candidates: [
             { store: "Trader Joe's", price: 2.0, unit },
             { store: "Star Market", price: 2.08, unit },
-          ]
-        : [
-            { store: "Trader Joe's", price: 1.99, unit },
-            { store: "Star Market", price: 2.49, unit },
-            { store: "Whole Foods", price: 2.79, unit },
-          ];
-      return JSON.stringify({ candidates });
+          ],
+        });
+      }
+
+      return JSON.stringify({
+        candidates: [
+          { store: "Trader Joe's", price: 1.99, unit },
+          { store: "Star Market", price: 2.49, unit },
+          { store: "Whole Foods", price: 2.79, unit },
+        ],
+      });
     }
 
     if (options.operation === "crowd_parse") {
       const reply = /reply:\s*"([^"]+)"/i.exec(prompt)?.[1] ?? prompt;
       const priceMatch = /\$?\s*(\d+(?:\.\d{1,2})?)/.exec(reply);
-      const atStoreMatch = /\bat\s+([A-Za-z0-9 '&.-]+)/i.exec(reply);
       const storeMatch = /^([A-Za-z0-9 '&.-]+?)\s+(?:has|is|for|\$)/i.exec(reply);
       return JSON.stringify({
-        store: (atStoreMatch?.[1] ?? storeMatch?.[1] ?? "Unknown store").trim(),
+        store: (storeMatch?.[1] ?? "Unknown store").trim(),
         price: priceMatch ? Number(priceMatch[1]) : null,
       });
     }
@@ -138,6 +167,6 @@ export default class Gemini {
       return JSON.stringify({ stub: true, operation: options.operation });
     }
 
-    return `[stub:${GEMINI_MODEL}] ${prompt}`;
+    return `[stub:${OPENAI_MODEL}] ${prompt}`;
   }
 }

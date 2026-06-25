@@ -17,7 +17,7 @@ import {
 } from "../data/schema";
 import { DataStore } from "../data/store";
 import { findUserByTelegramId } from "../data/users";
-import Gemini from "../llm/gemini";
+import { LlmClient } from "../llm";
 
 type CandidateSource = PriceSource | "db";
 
@@ -171,7 +171,7 @@ async function logDbHit(store: DataStore, userId: number, requestId: number): Pr
 }
 
 async function parseRequest(
-  gemini: Gemini,
+  gemini: LlmClient,
   rawText: string,
   userId: number,
   requestId: number
@@ -201,7 +201,7 @@ async function parseRequest(
 }
 
 async function freshSweep(
-  gemini: Gemini,
+  gemini: LlmClient,
   itemName: string,
   zipCode: string,
   userId: number,
@@ -265,7 +265,7 @@ async function queueConfirmation(
 async function askCrowdForHelp(
   ctx: Context,
   store: DataStore,
-  gemini: Gemini,
+  gemini: LlmClient,
   request: PurchaseRequestRow,
   itemName: string,
   zipCode: string
@@ -293,7 +293,7 @@ async function askCrowdForHelp(
   await ctx.reply("No clear winner yet. I asked the Hearth crowd and will confirm before checkout.");
 }
 
-export async function handleBuyRequest(ctx: Context, store: DataStore, gemini: Gemini): Promise<void> {
+export async function handleBuyRequest(ctx: Context, store: DataStore, gemini: LlmClient): Promise<void> {
   const rawText = messageText(ctx);
   const telegramUserId = ctx.from?.id;
   if (!telegramUserId) return;
@@ -446,7 +446,7 @@ export async function handleConfirmationCallback(ctx: Context, store: DataStore)
 
 async function parseCrowdReply(
   store: DataStore,
-  gemini: Gemini,
+  gemini: LlmClient,
   post: SocialPostRow,
   rawText: string
 ): Promise<{ storeName: string | null; price: number | null }> {
@@ -479,7 +479,7 @@ async function parseCrowdReply(
   };
 }
 
-export async function handleCrowdReply(ctx: Context, store: DataStore, gemini: Gemini): Promise<void> {
+export async function handleCrowdReply(ctx: Context, store: DataStore, gemini: LlmClient): Promise<void> {
   if (!HEARTH_CROWD_GROUP_ID) return;
 
   const chatId = ctx.chat?.id;
@@ -528,7 +528,7 @@ export async function handleCrowdReply(ctx: Context, store: DataStore, gemini: G
 function scheduleCrowdResolution(
   postId: number,
   store: DataStore,
-  gemini: Gemini,
+  gemini: LlmClient,
   api: TelegramSender
 ): void {
   if (crowdTimers.has(postId)) return;

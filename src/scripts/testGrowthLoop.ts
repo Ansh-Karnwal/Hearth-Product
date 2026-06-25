@@ -1,8 +1,10 @@
+import os from "node:os";
+import path from "node:path";
 import { Bot } from "grammy";
 import { HEARTH_CHANNEL_ID } from "../config";
 import { PriceIntelligenceRow } from "../data/schema";
 import { SqliteStore } from "../data/sqliteStore";
-import Gemini from "../llm/gemini";
+import { createLlm } from "../llm";
 import { runGrowthLoop } from "../loops/growth";
 
 const fakeBot = {
@@ -37,8 +39,8 @@ async function main(): Promise<void> {
     throw new Error("Set HEARTH_CHANNEL_ID for this script, e.g. HEARTH_CHANNEL_ID=@hearth_test");
   }
 
-  const store = new SqliteStore(`/tmp/hearth-growth-loop-${process.pid}.db`);
-  const gemini = new Gemini(store, "");
+  const store = new SqliteStore(path.join(os.tmpdir(), `hearth-growth-loop-${process.pid}.db`));
+  const llm = createLlm(store);
   const now = new Date();
   const current = now.toISOString();
   const previous = new Date(now.getTime() - 9 * 24 * 60 * 60 * 1000).toISOString();
@@ -48,7 +50,7 @@ async function main(): Promise<void> {
   await insertPrice(store, "eggs", "Trader Joe's", 4.49, current);
   await insertPrice(store, "eggs", "Trader Joe's", 2.99, previous);
 
-  console.log("Growth result:", await runGrowthLoop(store, gemini, fakeBot));
+  console.log("Growth result:", await runGrowthLoop(store, llm, fakeBot));
   console.log("Social posts:", await store.query("social_posts", { sort: [["id", "asc"]] }));
   console.log("Token usage:", await store.query("token_usage", { sort: [["id", "asc"]] }));
 

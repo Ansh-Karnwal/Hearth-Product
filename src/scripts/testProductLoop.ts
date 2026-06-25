@@ -1,6 +1,8 @@
+import os from "node:os";
+import path from "node:path";
 import { UserRow } from "../data/schema";
 import { SqliteStore } from "../data/sqliteStore";
-import Gemini from "../llm/gemini";
+import { createLlm } from "../llm";
 import { currentMonthRange, formatUsageSummary, usageFor } from "../loops/monetization";
 import { confirmPurchaseRequest, handleBuyRequest } from "../loops/product";
 
@@ -41,8 +43,8 @@ async function operationsForRequest(store: SqliteStore, requestId: number): Prom
 }
 
 async function main(): Promise<void> {
-  const store = new SqliteStore(`/tmp/hearth-product-loop-${process.pid}.db`);
-  const gemini = new Gemini(store, "");
+  const store = new SqliteStore(path.join(os.tmpdir(), `hearth-product-loop-${process.pid}.db`));
+  const llm = createLlm(store);
 
   const user = await store.insert<UserRow>("users", {
     phone_number: "+16175550100",
@@ -52,7 +54,7 @@ async function main(): Promise<void> {
     created_at: new Date().toISOString(),
   });
 
-  await handleBuyRequest(fakePrivateCtx("buy me celery"), store, gemini);
+  await handleBuyRequest(fakePrivateCtx("buy me celery"), store, llm);
   const firstRequestId = await latestRequestId(store);
   console.log("First request ops before confirm:", await operationsForRequest(store, firstRequestId));
   console.log("First confirm:", await confirmPurchaseRequest(store, firstRequestId, true));
@@ -63,7 +65,7 @@ async function main(): Promise<void> {
   });
   console.log("Learned prices after first run:", learnedAfterFirst);
 
-  await handleBuyRequest(fakePrivateCtx("buy me celery"), store, gemini);
+  await handleBuyRequest(fakePrivateCtx("buy me celery"), store, llm);
   const secondRequestId = await latestRequestId(store);
   console.log("Second request ops before confirm:", await operationsForRequest(store, secondRequestId));
   console.log("Second confirm:", await confirmPurchaseRequest(store, secondRequestId, true));

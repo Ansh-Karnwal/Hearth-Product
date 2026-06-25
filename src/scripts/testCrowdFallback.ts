@@ -1,7 +1,9 @@
+import os from "node:os";
+import path from "node:path";
 import { HEARTH_CROWD_GROUP_ID } from "../config";
 import { SocialPostRow, UserRow } from "../data/schema";
 import { SqliteStore } from "../data/sqliteStore";
-import Gemini from "../llm/gemini";
+import { createLlm } from "../llm";
 import {
   confirmPurchaseRequest,
   handleBuyRequest,
@@ -55,8 +57,8 @@ async function main(): Promise<void> {
     throw new Error("Set HEARTH_CROWD_GROUP_ID for this script, e.g. HEARTH_CROWD_GROUP_ID=-100123");
   }
 
-  const store = new SqliteStore(`/tmp/hearth-crowd-loop-${process.pid}.db`);
-  const gemini = new Gemini(store, "");
+  const store = new SqliteStore(path.join(os.tmpdir(), `hearth-crowd-loop-${process.pid}.db`));
+  const llm = createLlm(store);
 
   await store.insert<UserRow>("users", {
     phone_number: "+16175550101",
@@ -66,7 +68,7 @@ async function main(): Promise<void> {
     created_at: new Date().toISOString(),
   });
 
-  await handleBuyRequest(fakePrivateCtx("buy me ambiguous apples"), store, gemini);
+  await handleBuyRequest(fakePrivateCtx("buy me ambiguous apples"), store, llm);
   const post = (
     await store.query<SocialPostRow>("social_posts", {
       filters: { post_type: "crowd_question" },
@@ -76,7 +78,7 @@ async function main(): Promise<void> {
   )[0];
   console.log("Crowd post:", post);
 
-  await handleCrowdReply(fakeCrowdCtx(post.telegram_message_id!), store, gemini);
+  await handleCrowdReply(fakeCrowdCtx(post.telegram_message_id!), store, llm);
   console.log("Crowd responses:", await store.query("crowd_responses", { sort: [["id", "asc"]] }));
 
   await resolveCrowdQuestion(post.id, store, fakeApi);

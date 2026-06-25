@@ -3,7 +3,7 @@ import { HEARTH_ADMIN_TELEGRAM_IDS, TELEGRAM_BOT_TOKEN } from "../config";
 import { UserRow } from "../data/schema";
 import { DataStore } from "../data/store";
 import { findUserByPhone, findUserByTelegramId, normalizePhone } from "../data/users";
-import Gemini from "../llm/gemini";
+import { LlmClient } from "../llm";
 import { runGrowthLoop } from "../loops/growth";
 import { currentMonthRange, formatUsageSummary, usageFor, usageForAll } from "../loops/monetization";
 import { handleBuyRequest, handleConfirmationCallback, handleCrowdReply } from "../loops/product";
@@ -84,11 +84,11 @@ export async function handleTextMessage(
   return ACK_TEXT;
 }
 
-export function createBot(store: DataStore, gemini: Gemini): Bot {
+export function createBot(store: DataStore, gemini: LlmClient): Bot {
   const bot = new Bot(TELEGRAM_BOT_TOKEN);
 
   // Without a global error boundary, an unhandled throw in any handler (e.g. a
-  // Gemini API error) crashes the whole long-polling process instead of just
+  // LLM API error) crashes the whole long-polling process instead of just
   // failing that one update. See https://grammy.dev/guide/errors.
   bot.catch(({ ctx, error }) => {
     console.error(`Error while handling update ${ctx.update.update_id}:`, error);
