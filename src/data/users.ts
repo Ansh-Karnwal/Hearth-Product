@@ -6,6 +6,16 @@ export function normalizePhone(raw: string): string {
   return trimmed.startsWith("+") ? trimmed : `+${trimmed}`;
 }
 
+// Desktop/web Telegram clients don't always render the request-contact button
+// reliably, so users often type their number instead of tapping it. This lets
+// the text handler recognize that case rather than silently dropping it.
+export function looksLikePhoneNumber(text: string): boolean {
+  const trimmed = text.trim();
+  if (!/^\+?[\d\s\-()]+$/.test(trimmed)) return false;
+  const digitsOnly = trimmed.replace(/\D/g, "");
+  return digitsOnly.length >= 7 && digitsOnly.length <= 15;
+}
+
 export async function findUserByPhone(store: DataStore, phoneNumber: string): Promise<UserRow | null> {
   const rows = await store.query<UserRow>("users", { filters: { phone_number: phoneNumber }, limit: 1 });
   return rows[0] ?? null;

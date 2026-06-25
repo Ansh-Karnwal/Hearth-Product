@@ -2,7 +2,8 @@ import { Bot, Context, Keyboard } from "grammy";
 import { HEARTH_ADMIN_TELEGRAM_IDS, TELEGRAM_BOT_TOKEN } from "../config";
 import { UserRow } from "../data/schema";
 import { DataStore } from "../data/store";
-import { findUserByPhone, findUserByTelegramId, normalizePhone } from "../data/users";
+import { findUserByPhone, findUserByTelegramId, looksLikePhoneNumber, normalizePhone } from "../data/users";
+import { isDebugMode, setDebugMode } from "../debug";
 import { LlmClient } from "../llm";
 import { runGrowthLoop } from "../loops/growth";
 import { currentMonthRange, formatUsageSummary, usageFor, usageForAll } from "../loops/monetization";
@@ -10,6 +11,20 @@ import { handleBuyRequest, handleConfirmationCallback, handleCrowdReply } from "
 
 const CONTACT_BUTTON_TEXT = "Share phone number to set up Hearth";
 const ACK_TEXT = "Got it. Say 'buy me <item>' and I'll find you the best price.";
+
+const USER_HELP_TEXT = [
+  "Here's what you can do:",
+  '• Say "buy me <item>" — I\'ll price-sweep grocery stores near you and confirm before checkout.',
+  "/usage — see your token usage and spend this month.",
+  "/help — show this again.",
+].join("\n");
+
+const ADMIN_HELP_TEXT = [
+  "Admin commands:",
+  "/growthnow — run the growth loop immediately.",
+  "/usage_all — usage summary for all users.",
+  "/debug [on|off] — toggle verbose debug logging.",
+].join("\n");
 
 function isAdmin(telegramUserId: number): boolean {
   return HEARTH_ADMIN_TELEGRAM_IDS.includes(telegramUserId);
@@ -51,7 +66,10 @@ export async function handleContactShare(
   const phoneNumber = normalizePhone(payload.phoneNumber);
   const existing = await findUserByPhone(store, phoneNumber);
   if (existing) {
-    return `Welcome back, ${existing.display_name ?? "there"}!`;
+    const greeting = `Welcome back, ${existing.display_name ?? "there"}!`;
+    return existing.zip_code
+      ? greeting
+      : `${greeting} What's your ZIP code? I need it to match you with nearby prices.`;
   }
 
   const displayName =
@@ -68,17 +86,38 @@ export async function handleContactShare(
   return "Thanks! What's your ZIP code? I need it to match you with nearby prices.";
 }
 
+export interface TelegramName {
+  firstName: string;
+  lastName?: string;
+}
+
 export async function handleTextMessage(
   store: DataStore,
   telegramUserId: number,
-  text: string
+  text: string,
+  from: TelegramName
 ): Promise<string> {
   const user = await findUserByTelegramId(store, telegramUserId);
 
-  if (user && !user.zip_code) {
+  if (!user) {
+    // Desktop/web clients don't always render the request-contact button, so
+    // a user typing their number by hand should register just like tapping it.
+    if (!looksLikePhoneNumber(text)) {
+      return "Start with /start, then share your phone number — tap the button, or just type the number — so I can set up your Hearth account.";
+    }
+
+    return handleContactShare(store, {
+      phoneNumber: text,
+      firstName: from.firstName,
+      lastName: from.lastName,
+      telegramUserId,
+    });
+  }
+
+  if (!user.zip_code) {
     const zipCode = text.trim();
     await store.update<UserRow>("users", user.id, { zip_code: zipCode });
-    return `Got it — ${zipCode} saved. ${ACK_TEXT}`;
+    return `Got it — ${zipCode} saved.\n\n${USER_HELP_TEXT}`;
   }
 
   return ACK_TEXT;
@@ -94,6 +133,16 @@ export function createBot(store: DataStore, gemini: LlmClient): Bot {
     console.error(`Error while handling update ${ctx.update.update_id}:`, error);
     ctx.reply("Something went wrong on my end — please try again.").catch(() => undefined);
   });
+
+  // Populates Telegram's native "/" command menu in DMs. Admin-only commands
+  // (growthnow/usage_all/debug) are deliberately left off this public list.
+  bot.api
+    .setMyCommands([
+      { command: "start", description: "Set up your Hearth account" },
+      { command: "help", description: "See what Hearth can do" },
+      { command: "usage", description: "Your token usage this month" },
+    ])
+    .catch((error) => console.error("setMyCommands failed", error));
 
   const dm = bot.chatType("private");
   const group = bot.chatType("group");
@@ -116,6 +165,20 @@ export function createBot(store: DataStore, gemini: LlmClient): Bot {
     await ctx.reply(formatUsageSummary(summary, "All Hearth usage this month"));
   });
 
+  // Toggles verbose console tracing (raw LLM requests/responses, web-search
+  // grounding, every DataStore key/value mutation) without a restart — see ../debug.ts.
+  bot.command("debug", async (ctx) => {
+    if (!(await requireAdmin(ctx))) return;
+    const arg = ctx.match?.toString().trim().toLowerCase();
+    if (arg === "on" || arg === "off") {
+      setDebugMode(arg === "on");
+    } else if (arg) {
+      await ctx.reply("Usage: /debug on, /debug off, or /debug with no argument to check status.");
+      return;
+    }
+    await ctx.reply(`Debug mode is ${isDebugMode() ? "ON" : "OFF"} (verbose logs print to the server console).`);
+  });
+
   group.on("message:text", async (ctx) => {
     await handleCrowdReply(ctx, store, gemini);
   });
@@ -132,9 +195,15 @@ export function createBot(store: DataStore, gemini: LlmClient): Bot {
     }
 
     const keyboard = new Keyboard().requestContact(CONTACT_BUTTON_TEXT).resized().oneTime();
-    await ctx.reply("Welcome to Hearth! Share your phone number to get set up.", {
-      reply_markup: keyboard,
-    });
+    await ctx.reply(
+      "Welcome to Hearth! Share your phone number to get set up — tap the button below, or just type your number.",
+      { reply_markup: keyboard }
+    );
+  });
+
+  dm.command("help", async (ctx) => {
+    const text = isAdmin(ctx.from.id) ? `${USER_HELP_TEXT}\n\n${ADMIN_HELP_TEXT}` : USER_HELP_TEXT;
+    await ctx.reply(text);
   });
 
   dm.command("usage", async (ctx) => {
@@ -167,7 +236,10 @@ export function createBot(store: DataStore, gemini: LlmClient): Bot {
       return;
     }
 
-    const reply = await handleTextMessage(store, ctx.from.id, ctx.message.text);
+    const reply = await handleTextMessage(store, ctx.from.id, ctx.message.text, {
+      firstName: ctx.from.first_name,
+      lastName: ctx.from.last_name,
+    });
     await ctx.reply(reply);
   });
 

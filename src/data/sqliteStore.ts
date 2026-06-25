@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { debugLog } from "../debug";
 import { ColumnDef, schema, TableDef } from "./schema";
 import { DataStore, QueryOptions, RangeFilter } from "./store";
 
@@ -57,6 +58,7 @@ export class SqliteStore implements DataStore {
     const info = this.db.prepare(`INSERT INTO ${table} (${columns}) VALUES (${placeholders})`).run(...values);
     const row = await this.get<T>(table, Number(info.lastInsertRowid));
     if (!row) throw new Error(`Failed to read back inserted row in ${table}`);
+    debugLog("db:insert", `${table} id=${info.lastInsertRowid}`, record);
     return row;
   }
 
@@ -121,11 +123,13 @@ export class SqliteStore implements DataStore {
     }
     const row = await this.get<T>(table, id);
     if (!row) throw new Error(`${table} id=${id} not found after update`);
+    debugLog("db:update", `${table} id=${id}`, patch);
     return row;
   }
 
   async delete(table: string, id: number): Promise<void> {
     this.db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
+    debugLog("db:delete", `${table} id=${id}`);
   }
 
   close(): void {

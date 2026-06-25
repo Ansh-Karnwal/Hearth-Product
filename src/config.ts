@@ -11,6 +11,7 @@ export const HEARTH_CHANNEL_ID: string = process.env.HEARTH_CHANNEL_ID ?? "";
 export const HEARTH_CROWD_GROUP_ID: string = process.env.HEARTH_CROWD_GROUP_ID ?? "";
 export const DB_PATH: string = process.env.DB_PATH ?? "hearth.db";
 export const LLM_BACKEND = (process.env.LLM_BACKEND ?? "gemini").toLowerCase();
+export const DEBUG_MODE = (process.env.DEBUG_MODE ?? "false").toLowerCase() === "true";
 export const HEARTH_ADMIN_TELEGRAM_IDS = (process.env.HEARTH_ADMIN_TELEGRAM_IDS ?? "")
   .split(",")
   .map((id) => Number(id.trim()))

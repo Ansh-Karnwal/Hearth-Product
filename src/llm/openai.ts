@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { OPENAI_MODEL } from "../config";
 import { TokenUsageRow } from "../data/schema";
 import { DataStore } from "../data/store";
+import { debugLog } from "../debug";
 import { GenerateOptions, GenerateResult, UsageMetadata } from "./types";
 
 // Strips ```json fences models sometimes wrap structured output in, then
@@ -63,6 +64,12 @@ export default class OpenAiLlm {
       { role: "user", content: prompt },
     ];
 
+    debugLog("openai:request", `operation=${options.operation} grounded=${!!options.grounded}`, {
+      model: OPENAI_MODEL,
+      input,
+      jsonSchema: options.jsonSchema,
+    });
+
     const response = await this.client!.responses.create({
       model: OPENAI_MODEL,
       input,
@@ -87,8 +94,23 @@ export default class OpenAiLlm {
         : {}),
     } as any);
 
+    debugLog("openai:raw-response", `operation=${options.operation}`, response);
+
+    if (options.grounded) {
+      const searchCalls = (response.output ?? []).filter(
+        (item: { type?: string }) => item.type === "web_search_call"
+      );
+      if (searchCalls.length > 0) {
+        debugLog("openai:websearch", `operation=${options.operation}`, searchCalls);
+      }
+    }
+
     const rawText = outputTextFrom(response);
     const text = options.jsonSchema ? cleanJsonText(rawText) : rawText;
+    if (text !== rawText) {
+      debugLog("openai:cleaned-text", `operation=${options.operation}`, { rawText, cleanedText: text });
+    }
+
     const usage: UsageMetadata = {
       promptTokens: response.usage?.input_tokens ?? 0,
       completionTokens: response.usage?.output_tokens ?? 0,
@@ -100,6 +122,7 @@ export default class OpenAiLlm {
 
   private stubGenerate(prompt: string, options: GenerateOptions): GenerateResult {
     const text = this.stubText(prompt, options);
+    debugLog("openai:stub-response", `operation=${options.operation} (no OPENAI_API_KEY set)`, { prompt, text });
     const promptTokens = estimateTokens(prompt);
     const completionTokens = estimateTokens(text);
 

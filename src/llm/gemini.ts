@@ -2,6 +2,7 @@ import { GoogleGenAI } from "@google/genai";
 import { GEMINI_MODEL } from "../config";
 import { TokenUsageRow } from "../data/schema";
 import { DataStore } from "../data/store";
+import { debugLog } from "../debug";
 import { GenerateOptions, GenerateResult, UsageMetadata } from "./types";
 
 // Strips ```json fences models sometimes wrap structured output in, then
@@ -48,6 +49,13 @@ export default class Gemini {
   }
 
   private async callGemini(prompt: string, options: GenerateOptions): Promise<GenerateResult> {
+    debugLog("gemini:request", `operation=${options.operation} grounded=${!!options.grounded}`, {
+      model: GEMINI_MODEL,
+      prompt,
+      system: options.system,
+      jsonSchema: options.jsonSchema,
+    });
+
     const response = await this.client!.models.generateContent({
       model: GEMINI_MODEL,
       contents: prompt,
@@ -60,8 +68,21 @@ export default class Gemini {
       },
     });
 
+    debugLog("gemini:raw-response", `operation=${options.operation}`, response);
+
+    const groundingMetadata = response.candidates?.[0]?.groundingMetadata;
+    if (options.grounded && groundingMetadata) {
+      debugLog("gemini:websearch", `operation=${options.operation}`, {
+        queries: groundingMetadata.webSearchQueries,
+        sources: groundingMetadata.groundingChunks?.map((chunk) => chunk.web),
+      });
+    }
+
     const rawText = response.text ?? "";
     const text = options.jsonSchema ? cleanJsonText(rawText) : rawText;
+    if (text !== rawText) {
+      debugLog("gemini:cleaned-text", `operation=${options.operation}`, { rawText, cleanedText: text });
+    }
 
     const usage: UsageMetadata = {
       promptTokens: response.usageMetadata?.promptTokenCount ?? 0,
@@ -74,6 +95,7 @@ export default class Gemini {
 
   private stubGenerate(prompt: string, options: GenerateOptions): GenerateResult {
     const text = this.stubText(prompt, options);
+    debugLog("gemini:stub-response", `operation=${options.operation} (no GEMINI_API_KEY set)`, { prompt, text });
 
     const promptTokens = estimateTokens(prompt);
     const completionTokens = estimateTokens(text);
